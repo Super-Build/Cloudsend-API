@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Docker image tag, e.g. v1.0.0 or test-001"
+        description: "Docker image tag"
         required: true
-        default: "manual-latest"
+        default: "latest"
 
 permissions:
   contents: write
