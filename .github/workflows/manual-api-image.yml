@@ -1,0 +1,194 @@
+name: Manual API Image Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      web_repo:
+        description: "Web admin repository (owner/repo), default: <repo_owner>/rustdesk-api-web"
+        required: false
+        default: ""
+      web_ref:
+        description: "Web admin git ref (branch/tag/sha)"
+        required: false
+        default: "main"
+      image_name:
+        description: "Image name without tag, e.g. ghcr.io/owner/rustdesk-api"
+        required: false
+        default: ""
+      image_tag:
+        description: "Image tag"
+        required: false
+        default: "manual-latest"
+      push_image:
+        description: "Push image to registry"
+        type: boolean
+        required: false
+        default: false
+      run_go_tests:
+        description: "Run Go tests (skips lib/cache integration tests)"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      GO_VERSION: "1.23"
+      NODE_VERSION: "20"
+    steps:
+      - name: Checkout API repository
+        uses: actions/checkout@v4
+
+      - name: Resolve web repo and image name
+        id: resolve
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.web_repo }}" ]; then
+            WEB_REPO="${{ inputs.web_repo }}"
+          else
+            WEB_REPO="${{ github.repository_owner }}/rustdesk-api-web"
+          fi
+          if [ -n "${{ inputs.image_name }}" ]; then
+            IMAGE_NAME="${{ inputs.image_name }}"
+          else
+            IMAGE_NAME="ghcr.io/${{ github.repository_owner }}/rustdesk-api"
+          fi
+          IMAGE_NAME=$(echo "${IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')
+          if [ -z "${IMAGE_NAME}" ]; then
+            echo "image_name is empty after normalization"
+            exit 1
+          fi
+          echo "web_repo=${WEB_REPO}" >> "$GITHUB_OUTPUT"
+          echo "image_name=${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Print resolved image target
+        shell: bash
+        run: |
+          echo "Final image: ${{ steps.resolve.outputs.image_name }}:${{ inputs.image_tag }}"
+
+      - name: Validate image tag
+        shell: bash
+        run: |
+          TAG="${{ inputs.image_tag }}"
+          if [ -z "${TAG}" ]; then
+            echo "image_tag cannot be empty"
+            exit 1
+          fi
+          if [[ "${TAG}" =~ [[:space:]] ]]; then
+            echo "image_tag cannot contain spaces"
+            exit 1
+          fi
+
+      - name: Checkout web admin repository
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ steps.resolve.outputs.web_repo }}
+          ref: ${{ inputs.web_ref }}
+          path: rustdesk-api-web
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Build web admin
+        working-directory: rustdesk-api-web
+        shell: bash
+        run: |
+          npm ci || npm install
+          npm run build
+          mkdir -p ../resources/admin
+          cp -ar dist/* ../resources/admin/
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Setup musl toolchain for sqlite cgo
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+
+      - name: Build API binary
+        shell: bash
+        run: |
+          go mod tidy
+          CC=x86_64-linux-musl-gcc CGO_ENABLED=1 CGO_LDFLAGS="-static" GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -o ./apimain ./cmd/apimain.go
+          ./apimain -h >/dev/null
+
+      - name: Prepare docker release layout
+        shell: bash
+        run: |
+          mkdir -p amd64/release
+          cp ./apimain amd64/release/apimain
+          chmod +x amd64/release/apimain
+          cp -ar conf amd64/release/
+          cp -ar resources amd64/release/
+          cp -ar docs amd64/release/
+          mkdir -p amd64/release/data amd64/release/runtime
+
+      - name: Optional Go tests (skip lib/cache integration tests)
+        if: ${{ inputs.run_go_tests }}
+        shell: bash
+        run: |
+          pkgs=$(go list ./... | grep -v '/lib/cache')
+          go test $pkgs
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login GHCR
+        if: ${{ inputs.push_image }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build local image for smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          tags: local/rustdesk-api:${{ github.run_id }}
+          build-args: |
+            BUILDARCH=amd64
+          load: true
+          push: false
+
+      - name: Smoke test container
+        shell: bash
+        run: |
+          docker run -d --name rustdesk-api-smoke -p 21114:21114 local/rustdesk-api:${{ github.run_id }}
+          for i in {1..20}; do
+            if curl -fsS "http://127.0.0.1:21114/api/version" >/dev/null; then
+              echo "Smoke test passed"
+              break
+            fi
+            sleep 2
+            if [ "$i" -eq 20 ]; then
+              echo "Smoke test failed"
+              docker logs rustdesk-api-smoke || true
+              exit 1
+            fi
+          done
+          docker rm -f rustdesk-api-smoke
+
+      - name: Build and push final image
+        if: ${{ inputs.push_image }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          build-args: |
+            BUILDARCH=amd64
+          tags: ${{ steps.resolve.outputs.image_name }}:${{ inputs.image_tag }}
+          push: true
