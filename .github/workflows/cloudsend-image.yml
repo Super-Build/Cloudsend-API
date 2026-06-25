@@ -47,7 +47,6 @@ jobs:
           repository: ${{ env.WEB_REPO }}
           ref: ${{ env.WEB_REF }}
           path: rustdesk-api-web
-          token: ${{ secrets.WEB_REPO_TOKEN }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
