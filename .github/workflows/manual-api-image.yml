@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       web_repo:
-        description: "Web admin repository (owner/repo), default: <repo_owner>/rustdesk-api-web"
+        description: "Web admin repository (owner/repo)"
         required: false
         default: ""
       web_ref:
@@ -51,7 +51,7 @@ jobs:
           if [ -n "${{ inputs.web_repo }}" ]; then
             WEB_REPO="${{ inputs.web_repo }}"
           else
-            WEB_REPO="${{ github.repository_owner }}/rustdesk-api-web"
+            WEB_REPO="Super-Build/Cloudsend-API-WEB"
           fi
           if [ -n "${{ inputs.image_name }}" ]; then
             IMAGE_NAME="${{ inputs.image_name }}"
@@ -90,7 +90,6 @@ jobs:
           repository: ${{ steps.resolve.outputs.web_repo }}
           ref: ${{ inputs.web_ref }}
           path: rustdesk-api-web
-          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Node
         uses: actions/setup-node@v4
